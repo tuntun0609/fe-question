@@ -1931,3 +1931,1564 @@ function UserPosts({ userId }) {
 - Server Components仍在实验阶段
 - 需要Next.js 13+或React Server Components支持
 6. **清理副作用防止内存泄漏**
+
+---
+
+## 高级主题
+
+### 21. React Fiber架构的详细原理是什么？双缓存机制如何工作？
+
+**答案：**
+
+**Fiber节点结构：**
+```javascript
+// Fiber节点（简化）
+const fiberNode = {
+  // 节点类型
+  type: 'div', // 或函数组件、类组件
+  key: null,
+  props: {},
+  
+  // 树结构
+  return: null,    // 父节点
+  child: null,     // 第一个子节点
+  sibling: null,   // 兄弟节点
+  
+  // 工作相关
+  alternate: null, // 对应的workInProgress节点
+  effectTag: 'UPDATE', // 副作用标记
+  updateQueue: null,   // 更新队列
+  
+  // 状态
+  memoizedState: null, // Hook状态
+  memoizedProps: null, // 上次渲染的props
+};
+```
+
+**双缓存机制：**
+```javascript
+// React使用双缓存技术：
+// 1. current树：当前显示的Fiber树
+// 2. workInProgress树：正在构建的新Fiber树
+
+// 首次渲染
+let current = null;
+let workInProgress = null;
+
+function render(element, container) {
+  // 创建workInProgress根节点
+  workInProgress = {
+    type: 'ROOT',
+    child: null,
+    alternate: current
+  };
+  
+  // 构建workInProgress树
+  workInProgress.child = createFiber(element);
+  
+  // 提交阶段：切换指针
+  container.appendChild(workInProgress.child.stateNode);
+  current = workInProgress;
+  workInProgress = null;
+}
+
+// 更新时
+function update() {
+  // 复用current树创建workInProgress树
+  workInProgress = {
+    type: 'ROOT',
+    child: current.child ? cloneFiber(current.child) : null,
+    alternate: current
+  };
+  
+  // 协调过程
+  reconcileChildren(current, workInProgress);
+  
+  // 提交：切换指针
+  commitRoot(workInProgress);
+  current = workInProgress;
+  workInProgress = null;
+}
+```
+
+**工作循环：**
+```javascript
+// React工作循环（简化）
+let nextUnitOfWork = null;
+let wipRoot = null;
+
+function workLoop(deadline) {
+  let shouldYield = false;
+  
+  while (nextUnitOfWork && !shouldYield) {
+    // 执行工作单元
+    nextUnitOfWork = performUnitOfWork(nextUnitOfWork);
+    
+    // 检查是否还有时间
+    shouldYield = deadline.timeRemaining() < 1;
+  }
+  
+  // 如果没有更多工作，提交
+  if (!nextUnitOfWork && wipRoot) {
+    commitRoot();
+  }
+  
+  // 继续调度
+  requestIdleCallback(workLoop);
+}
+
+// 执行工作单元
+function performUnitOfWork(fiber) {
+  // 1. 执行组件，获取children
+  const children = beginWork(fiber);
+  
+  // 2. 返回下一个工作单元
+  if (fiber.child) {
+    return fiber.child; // 深度优先
+  }
+  
+  let nextFiber = fiber;
+  while (nextFiber) {
+    // 完成当前节点
+    completeWork(nextFiber);
+    
+    if (nextFiber.sibling) {
+      return nextFiber.sibling; // 兄弟节点
+    }
+    
+    nextFiber = nextFiber.return; // 返回父节点
+  }
+  
+  return null;
+}
+```
+
+### 22. React调度器（Scheduler）的工作原理是什么？如何实现优先级调度？
+
+**答案：**
+
+**调度器原理：**
+```javascript
+// React调度器使用时间切片和优先级队列
+
+// 优先级定义
+const ImmediatePriority = 1;
+const UserBlockingPriority = 2;
+const NormalPriority = 3;
+const LowPriority = 4;
+const IdlePriority = 5;
+
+// 优先级队列
+const taskQueue = [];
+const timerQueue = [];
+
+// 调度任务
+function scheduleCallback(priorityLevel, callback, options) {
+  const currentTime = getCurrentTime();
+  let timeout;
+  
+  switch (priorityLevel) {
+    case ImmediatePriority:
+      timeout = -1;
+      break;
+    case UserBlockingPriority:
+      timeout = 250;
+      break;
+    case NormalPriority:
+      timeout = 5000;
+      break;
+    case LowPriority:
+      timeout = 10000;
+      break;
+    case IdlePriority:
+      timeout = maxSigned31BitInt;
+      break;
+  }
+  
+  const expirationTime = currentTime + timeout;
+  
+  const newTask = {
+    id: taskIdCounter++,
+    callback,
+    priorityLevel,
+    startTime: currentTime,
+    expirationTime,
+    sortIndex: -1
+  };
+  
+  if (startTime > currentTime) {
+    // 延迟任务
+    newTask.sortIndex = startTime;
+    push(timerQueue, newTask);
+    
+    if (peek(taskQueue) === null && peek(timerQueue) === newTask) {
+      if (isHostTimeoutScheduled) {
+        cancelHostTimeout();
+      } else {
+        isHostTimeoutScheduled = true;
+      }
+      requestHostTimeout(handleTimeout, startTime - currentTime);
+    }
+  } else {
+    // 立即执行
+    newTask.sortIndex = expirationTime;
+    push(taskQueue, newTask);
+    
+    if (!isHostCallbackScheduled && !isPerformingWork) {
+      isHostCallbackScheduled = true;
+      requestHostCallback(flushWork);
+    }
+  }
+  
+  return newTask;
+}
+
+// 工作循环
+function workLoop(hasTimeRemaining, initialTime) {
+  let currentTime = initialTime;
+  advanceTimers(currentTime);
+  currentTask = peek(taskQueue);
+  
+  while (currentTask !== null) {
+    if (currentTask.expirationTime > currentTime && (!hasTimeRemaining || shouldYieldToHost())) {
+      break;
+    }
+    
+    const callback = currentTask.callback;
+    if (typeof callback === 'function') {
+      currentTask.callback = null;
+      currentPriorityLevel = currentTask.priorityLevel;
+      const didUserCallbackTimeout = currentTask.expirationTime <= currentTime;
+      const continuationCallback = callback(didUserCallbackTimeout);
+      currentTime = getCurrentTime();
+      
+      if (typeof continuationCallback === 'function') {
+        currentTask.callback = continuationCallback;
+      } else {
+        if (currentTask === peek(taskQueue)) {
+          pop(taskQueue);
+        }
+      }
+      
+      advanceTimers(currentTime);
+    } else {
+      pop(taskQueue);
+    }
+    
+    currentTask = peek(taskQueue);
+  }
+  
+  if (currentTask !== null) {
+    return true; // 还有更多工作
+  } else {
+    const firstTimer = peek(timerQueue);
+    if (firstTimer !== null) {
+      requestHostTimeout(handleTimeout, firstTimer.startTime - currentTime);
+    }
+    return false;
+  }
+}
+```
+
+**优先级更新：**
+```javascript
+// React使用Lane模型表示优先级
+const NoLanes = 0b0000000000000000000000000000000;
+const NoLane = 0b0000000000000000000000000000000;
+
+const SyncLane = 0b0000000000000000000000000000001;
+const InputContinuousLane = 0b0000000000000000000000000000100;
+const DefaultLane = 0b0000000000000000000000000010000;
+const TransitionLane = 0b0000000000000000000000100000000;
+const IdleLane = 0b0100000000000000000000000000000;
+
+// 获取最高优先级
+function getHighestPriorityLane(lanes) {
+  return lanes & -lanes;
+}
+
+// 合并优先级
+function mergeLanes(a, b) {
+  return a | b;
+}
+```
+
+### 23. React并发渲染是如何实现的？Suspense的原理是什么？
+
+**答案：**
+
+**并发渲染：**
+```javascript
+// React 18并发渲染
+import { startTransition, useTransition } from 'react';
+
+function App() {
+  const [isPending, startTransition] = useTransition();
+  const [input, setInput] = useState('');
+  const [list, setList] = useState([]);
+  
+  function handleChange(e) {
+    setInput(e.target.value); // 紧急更新
+    
+    startTransition(() => {
+      // 非紧急更新，可以中断
+      setList(expensiveFilter(e.target.value));
+    });
+  }
+  
+  return (
+    <div>
+      <input value={input} onChange={handleChange} />
+      {isPending && <Spinner />}
+      <List items={list} />
+    </div>
+  );
+}
+
+// 底层实现（简化）
+function startTransition(scope) {
+  const prevTransition = ReactCurrentBatchConfig.transition;
+  ReactCurrentBatchConfig.transition = {};
+  
+  try {
+    scope();
+  } finally {
+    ReactCurrentBatchConfig.transition = prevTransition;
+  }
+}
+```
+
+**Suspense原理：**
+```javascript
+// Suspense实现（简化）
+function Suspense({ children, fallback }) {
+  const [isPending, setIsPending] = useState(false);
+  
+  useEffect(() => {
+    // 监听Promise状态
+    const promises = collectPromises(children);
+    
+    if (promises.length > 0) {
+      setIsPending(true);
+      Promise.all(promises).then(() => {
+        setIsPending(false);
+      });
+    }
+  }, [children]);
+  
+  if (isPending) {
+    return fallback;
+  }
+  
+  return children;
+}
+
+// 使用Suspense
+function DataComponent() {
+  const data = useSuspenseQuery('/api/data');
+  return <div>{data.name}</div>;
+}
+
+function App() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <DataComponent />
+    </Suspense>
+  );
+}
+```
+
+### 24. Hooks的实现原理是什么？如何避免闭包陷阱？
+
+**答案：**
+
+**Hooks实现原理：**
+```javascript
+// Hooks使用链表存储
+let currentHook = null;
+let workInProgressHook = null;
+let currentlyRenderingFiber = null;
+
+function useState(initialState) {
+  return useReducer(null, initialState);
+}
+
+function useReducer(reducer, initialState) {
+  const hook = updateWorkInProgressHook();
+  
+  if (!currentlyRenderingFiber.alternate) {
+    // 首次渲染
+    hook.memoizedState = typeof initialState === 'function' 
+      ? initialState() 
+      : initialState;
+  }
+  
+  const dispatch = dispatchAction.bind(null, currentlyRenderingFiber, hook.queue);
+  
+  return [hook.memoizedState, dispatch];
+}
+
+function updateWorkInProgressHook() {
+  let nextCurrentHook;
+  
+  if (currentHook === null) {
+    // 首次渲染
+    const current = currentlyRenderingFiber.alternate;
+    if (current !== null) {
+      nextCurrentHook = current.memoizedState;
+    } else {
+      nextCurrentHook = null;
+    }
+  } else {
+    nextCurrentHook = currentHook.next;
+  }
+  
+  let nextWorkInProgressHook;
+  if (workInProgressHook === null) {
+    nextWorkInProgressHook = currentlyRenderingFiber.memoizedState;
+  } else {
+    nextWorkInProgressHook = workInProgressHook.next;
+  }
+  
+  if (nextWorkInProgressHook !== null) {
+    workInProgressHook = nextWorkInProgressHook;
+    workInProgressHook.memoizedState = nextCurrentHook.memoizedState;
+  } else {
+    // 创建新Hook
+    currentHook = nextCurrentHook;
+    
+    const newHook = {
+      memoizedState: currentHook === null ? null : currentHook.memoizedState,
+      baseState: null,
+      queue: null,
+      baseUpdate: null,
+      next: null
+    };
+    
+    if (workInProgressHook === null) {
+      currentlyRenderingFiber.memoizedState = workInProgressHook = newHook;
+    } else {
+      workInProgressHook = workInProgressHook.next = newHook;
+    }
+  }
+  
+  return workInProgressHook;
+}
+```
+
+**闭包陷阱：**
+```javascript
+// 问题：闭包捕获旧值
+function Counter() {
+  const [count, setCount] = useState(0);
+  
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCount(count + 1); // 总是基于初始值0
+    }, 1000);
+    
+    return () => clearInterval(timer);
+  }, []); // 空依赖数组
+  
+  return <div>{count}</div>;
+}
+
+// 解决方案1：使用函数式更新
+function CounterFixed() {
+  const [count, setCount] = useState(0);
+  
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCount(prev => prev + 1); // 基于最新值
+    }, 1000);
+    
+    return () => clearInterval(timer);
+  }, []);
+  
+  return <div>{count}</div>;
+}
+
+// 解决方案2：使用useRef
+function CounterFixed2() {
+  const [count, setCount] = useState(0);
+  const countRef = useRef(count);
+  
+  useEffect(() => {
+    countRef.current = count;
+  });
+  
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCount(countRef.current + 1);
+    }, 1000);
+    
+    return () => clearInterval(timer);
+  }, []);
+  
+  return <div>{count}</div>;
+}
+```
+
+### 25. React的Diff算法是如何优化的？key的作用是什么？
+
+**答案：**
+
+**Diff算法：**
+```javascript
+// React Diff算法（简化）
+function reconcileChildren(current, workInProgress, nextChildren) {
+  if (current === null) {
+    // 首次渲染
+    workInProgress.child = mountChildFibers(workInProgress, null, nextChildren);
+  } else {
+    // 更新
+    workInProgress.child = reconcileChildFibers(
+      workInProgress,
+      current.child,
+      nextChildren
+    );
+  }
+}
+
+function reconcileChildFibers(returnFiber, currentFirstChild, newChild) {
+  // 单节点Diff
+  if (typeof newChild === 'object' && newChild !== null) {
+    switch (newChild.$$typeof) {
+      case REACT_ELEMENT_TYPE:
+        return placeSingleChild(
+          reconcileSingleElement(returnFiber, currentFirstChild, newChild)
+        );
+    }
+  }
+  
+  // 多节点Diff
+  if (Array.isArray(newChild)) {
+    return reconcileChildrenArray(returnFiber, currentFirstChild, newChild);
+  }
+  
+  return null;
+}
+
+// 单节点Diff
+function reconcileSingleElement(returnFiber, currentFirstChild, element) {
+  const key = element.key;
+  let child = currentFirstChild;
+  
+  while (child !== null) {
+    if (child.key === key) {
+      // key相同，可以复用
+      if (child.type === element.type) {
+        // type也相同，完全复用
+        deleteRemainingChildren(returnFiber, child.sibling);
+        const existing = useFiber(child, element.props);
+        existing.return = returnFiber;
+        return existing;
+      } else {
+        // type不同，删除旧的，创建新的
+        deleteRemainingChildren(returnFiber, child);
+        break;
+      }
+    } else {
+      // key不同，删除当前节点
+      deleteChild(returnFiber, child);
+    }
+    child = child.sibling;
+  }
+  
+  // 创建新节点
+  const created = createFiberFromElement(element, returnFiber.mode);
+  created.return = returnFiber;
+  return created;
+}
+```
+
+**key的作用：**
+```javascript
+// key帮助React识别哪些元素改变了
+// ❌ 没有key或使用index作为key
+function BadList({ items }) {
+  return (
+    <ul>
+      {items.map((item, index) => (
+        <li key={index}>{item.name}</li>
+        // 问题：删除中间项时，后续项的key都变了
+      ))}
+    </ul>
+  );
+}
+
+// ✅ 使用唯一ID作为key
+function GoodList({ items }) {
+  return (
+    <ul>
+      {items.map(item => (
+        <li key={item.id}>{item.name}</li>
+        // 删除项时，只有被删除的项需要更新
+      ))}
+    </ul>
+  );
+}
+
+// key的选择原则：
+// 1. 稳定：key不应该改变
+// 2. 唯一：同一列表中的key应该唯一
+// 3. 可预测：相同数据应该生成相同key
+```
+
+### 26. React合成事件系统是如何工作的？与原生事件有什么区别？
+
+**答案：**
+
+**合成事件：**
+```javascript
+// React事件系统（简化）
+const eventSystem = {
+  // 事件委托：所有事件都绑定到document（React 17+绑定到root）
+  rootContainerElement: null,
+  
+  // 事件映射
+  eventNameMapping: {
+    onClick: 'click',
+    onChange: 'change',
+    onInput: 'input'
+  },
+  
+  // 注册事件
+  listenTo(registrationName, mountAt) {
+    const dependencies = registrationNameDependencies[registrationName];
+    const isCapturePhaseListener = registrationName.indexOf('Capture') !== -1;
+    
+    dependencies.forEach(dependency => {
+      if (isCapturePhaseListener) {
+        mountAt.addEventListener(dependency, this, true);
+      } else {
+        mountAt.addEventListener(dependency, this, false);
+      }
+    });
+  },
+  
+  // 事件处理
+  handleEvent(nativeEvent) {
+    const target = nativeEvent.target;
+    const targetInst = getClosestInstanceFromNode(target);
+    
+    // 收集事件路径
+    const ancestors = [];
+    let node = targetInst;
+    while (node) {
+      ancestors.push(node);
+      node = node.return;
+    }
+    
+    // 创建合成事件
+    const syntheticEvent = createSyntheticEvent(nativeEvent);
+    
+    // 捕获阶段
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      if (ancestor.props && ancestor.props.onClickCapture) {
+        ancestor.props.onClickCapture(syntheticEvent);
+      }
+    }
+    
+    // 冒泡阶段
+    for (let i = 0; i < ancestors.length; i++) {
+      const ancestor = ancestors[i];
+      if (ancestor.props && ancestor.props.onClick) {
+        ancestor.props.onClick(syntheticEvent);
+      }
+      if (syntheticEvent.isPropagationStopped()) {
+        break;
+      }
+    }
+  }
+};
+
+// 合成事件对象
+function createSyntheticEvent(nativeEvent) {
+  const syntheticEvent = {
+    nativeEvent,
+    currentTarget: null,
+    target: nativeEvent.target,
+    type: nativeEvent.type,
+    bubbles: nativeEvent.bubbles,
+    cancelable: nativeEvent.cancelable,
+    defaultPrevented: false,
+    isPropagationStopped: false,
+    isDefaultPrevented: false,
+    
+    preventDefault() {
+      this.defaultPrevented = true;
+      if (this.nativeEvent.preventDefault) {
+        this.nativeEvent.preventDefault();
+      }
+    },
+    
+    stopPropagation() {
+      this.isPropagationStopped = true;
+      if (this.nativeEvent.stopPropagation) {
+        this.nativeEvent.stopPropagation();
+      }
+    }
+  };
+  
+  return syntheticEvent;
+}
+```
+
+**与原生事件的区别：**
+```javascript
+// 1. 事件委托
+// React：所有事件委托到root
+// 原生：直接绑定到元素
+
+// 2. 事件对象
+// React：SyntheticEvent（跨浏览器兼容）
+// 原生：原生Event对象
+
+// 3. 事件池
+// React 16：事件对象会被重用（已废弃）
+// React 17+：不再使用事件池
+
+// 4. 阻止默认行为
+function handleClick(e) {
+  e.preventDefault(); // React合成事件
+  e.nativeEvent.preventDefault(); // 原生事件
+}
+
+// 5. 异步访问事件
+// React 16：需要e.persist()
+function handleClick(e) {
+  e.persist(); // React 16需要
+  setTimeout(() => {
+    console.log(e.target); // React 17+不需要persist
+  }, 100);
+}
+```
+
+### 27. useMemo和useCallback的最佳实践是什么？如何避免过度优化？
+
+**答案：**
+
+**useMemo使用：**
+```javascript
+// ✅ 正确：缓存昂贵计算
+function ExpensiveComponent({ items, filter }) {
+  const filteredItems = useMemo(() => {
+    return items.filter(item => item.category === filter);
+  }, [items, filter]);
+  
+  return <List items={filteredItems} />;
+}
+
+// ❌ 错误：缓存简单计算
+function SimpleComponent({ count }) {
+  const doubled = useMemo(() => count * 2, [count]); // 不需要缓存
+  return <div>{doubled}</div>;
+}
+
+// ✅ 正确：缓存对象引用
+function ChildComponent({ config }) {
+  return <div>{config.title}</div>;
+}
+
+function ParentComponent() {
+  const config = useMemo(() => ({
+    title: 'Hello',
+    theme: 'dark'
+  }), []); // 避免每次创建新对象
+  
+  return <ChildComponent config={config} />;
+}
+```
+
+**useCallback使用：**
+```javascript
+// ✅ 正确：传递给子组件的回调
+const MemoizedChild = React.memo(Child);
+
+function Parent({ items }) {
+  const handleClick = useCallback((id) => {
+    console.log('Clicked:', id);
+  }, []); // 稳定引用
+  
+  return <MemoizedChild items={items} onClick={handleClick} />;
+}
+
+// ❌ 错误：不需要稳定的回调
+function SimpleComponent() {
+  const handleClick = useCallback(() => {
+    console.log('clicked');
+  }, []); // 不需要useCallback
+  
+  return <button onClick={handleClick}>Click</button>;
+}
+
+// ✅ 正确：依赖项处理
+function Component({ userId }) {
+  const fetchData = useCallback(async () => {
+    const data = await fetch(`/api/users/${userId}`);
+    return data.json();
+  }, [userId]); // 包含所有依赖
+  
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+}
+```
+
+**避免过度优化：**
+```javascript
+// 1. 不要过早优化
+// 先测量性能，再优化
+
+// 2. 理解成本
+// useMemo/useCallback本身有成本，只在必要时使用
+
+// 3. 使用React.memo配合
+const MemoizedComponent = React.memo(Component, (prevProps, nextProps) => {
+  // 自定义比较函数
+  return prevProps.id === nextProps.id;
+});
+```
+
+### 28. 如何实现React虚拟列表？如何处理动态高度？
+
+**答案：**
+
+**基础虚拟列表：**
+```javascript
+import { useState, useRef, useMemo, useEffect } from 'react';
+
+function VirtualList({ items, itemHeight, containerHeight, renderItem }) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const containerRef = useRef(null);
+  
+  const visibleRange = useMemo(() => {
+    const startIndex = Math.floor(scrollTop / itemHeight);
+    const endIndex = Math.min(
+      startIndex + Math.ceil(containerHeight / itemHeight) + 1,
+      items.length
+    );
+    return { startIndex, endIndex };
+  }, [scrollTop, itemHeight, containerHeight, items.length]);
+  
+  const visibleItems = useMemo(() => {
+    return items.slice(visibleRange.startIndex, visibleRange.endIndex);
+  }, [items, visibleRange]);
+  
+  const totalHeight = items.length * itemHeight;
+  const offsetY = visibleRange.startIndex * itemHeight;
+  
+  const handleScroll = (e) => {
+    setScrollTop(e.target.scrollTop);
+  };
+  
+  return (
+    <div
+      ref={containerRef}
+      style={{ height: containerHeight, overflow: 'auto' }}
+      onScroll={handleScroll}
+    >
+      <div style={{ height: totalHeight, position: 'relative' }}>
+        <div style={{ transform: `translateY(${offsetY}px)` }}>
+          {visibleItems.map((item, index) => (
+            <div
+              key={item.id}
+              style={{
+                height: itemHeight,
+                position: 'absolute',
+                top: (visibleRange.startIndex + index) * itemHeight
+              }}
+            >
+              {renderItem(item)}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+**动态高度虚拟列表：**
+```javascript
+function DynamicVirtualList({ items, containerHeight, renderItem }) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const [itemHeights, setItemHeights] = useState(new Map());
+  const containerRef = useRef(null);
+  
+  const estimatedHeight = 50;
+  
+  const getItemHeight = (index) => {
+    return itemHeights.get(index) || estimatedHeight;
+  };
+  
+  const getItemOffset = (index) => {
+    let offset = 0;
+    for (let i = 0; i < index; i++) {
+      offset += getItemHeight(i);
+    }
+    return offset;
+  };
+  
+  const findVisibleRange = () => {
+    let startIndex = 0;
+    let endIndex = items.length - 1;
+    
+    // 二分查找起始索引
+    let low = 0;
+    let high = items.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const offset = getItemOffset(mid);
+      if (offset < scrollTop) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+        startIndex = mid;
+      }
+    }
+    
+    // 查找结束索引
+    const visibleBottom = scrollTop + containerHeight;
+    for (let i = startIndex; i < items.length; i++) {
+      const offset = getItemOffset(i);
+      if (offset > visibleBottom) {
+        endIndex = i;
+        break;
+      }
+    }
+    
+    return { startIndex, endIndex };
+  };
+  
+  const { startIndex, endIndex } = findVisibleRange();
+  const visibleItems = items.slice(startIndex, endIndex + 1);
+  const totalHeight = getItemOffset(items.length - 1) + getItemHeight(items.length - 1);
+  
+  const measureRef = (index, element) => {
+    if (element) {
+      const height = element.offsetHeight;
+      if (itemHeights.get(index) !== height) {
+        setItemHeights(prev => {
+          const newMap = new Map(prev);
+          newMap.set(index, height);
+          return newMap;
+        });
+      }
+    }
+  };
+  
+  return (
+    <div
+      ref={containerRef}
+      style={{ height: containerHeight, overflow: 'auto' }}
+      onScroll={(e) => setScrollTop(e.target.scrollTop)}
+    >
+      <div style={{ height: totalHeight, position: 'relative' }}>
+        {visibleItems.map((item, index) => {
+          const actualIndex = startIndex + index;
+          const offset = getItemOffset(actualIndex);
+          
+          return (
+            <div
+              key={item.id}
+              ref={(el) => measureRef(actualIndex, el)}
+              style={{
+                position: 'absolute',
+                top: offset,
+                left: 0,
+                right: 0
+              }}
+            >
+              {renderItem(item)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+```
+
+### 29. 如何实现自定义Hooks的状态机、数据获取和表单验证？
+
+**答案：**
+
+**状态机Hook：**
+```javascript
+function useStateMachine(initialState, transitions) {
+  const [state, setState] = useState(initialState);
+  const [history, setHistory] = useState([initialState]);
+  
+  const transition = useCallback((event, payload) => {
+    setState(currentState => {
+      const transition = transitions[currentState]?.[event];
+      
+      if (!transition) {
+        console.warn(`Invalid transition from ${currentState} with event ${event}`);
+        return currentState;
+      }
+      
+      const newState = typeof transition === 'function' 
+        ? transition(payload) 
+        : transition;
+      
+      setHistory(prev => [...prev, newState]);
+      
+      return newState;
+    });
+  }, [transitions]);
+  
+  const canTransition = useCallback((event) => {
+    return !!transitions[state]?.[event];
+  }, [state, transitions]);
+  
+  return { state, transition, canTransition, history };
+}
+
+// 使用
+function TrafficLight() {
+  const { state, transition, canTransition } = useStateMachine('red', {
+    red: { next: 'green' },
+    green: { next: 'yellow' },
+    yellow: { next: 'red' }
+  });
+  
+  return (
+    <div>
+      <div>Current: {state}</div>
+      <button 
+        onClick={() => transition('next')}
+        disabled={!canTransition('next')}
+      >
+        Next
+      </button>
+    </div>
+  );
+}
+```
+
+**数据获取Hook：**
+```javascript
+function useAsyncData(url, options = {}) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  
+  useEffect(() => {
+    let cancelled = false;
+    const abortController = new AbortController();
+    
+    async function fetchData() {
+      try {
+        setLoading(true);
+        setError(null);
+        
+        const response = await fetch(url, {
+          ...options,
+          signal: abortController.signal
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        if (!cancelled) {
+          setData(result);
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError' && !cancelled) {
+          setError(err.message);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+    
+    fetchData();
+    
+    return () => {
+      cancelled = true;
+      abortController.abort();
+    };
+  }, [url]);
+  
+  const refetch = useCallback(() => {
+    // 触发重新获取
+  }, [url]);
+  
+  return { data, loading, error, refetch };
+}
+```
+
+**表单验证Hook：**
+```javascript
+function useForm(initialValues, validate) {
+  const [values, setValues] = useState(initialValues);
+  const [errors, setErrors] = useState({});
+  const [touched, setTouched] = useState({});
+  
+  const setValue = useCallback((name, value) => {
+    setValues(prev => ({ ...prev, [name]: value }));
+    
+    if (touched[name] && validate) {
+      const fieldErrors = validate({ ...values, [name]: value });
+      setErrors(prev => ({ ...prev, [name]: fieldErrors[name] }));
+    }
+  }, [values, touched, validate]);
+  
+  const setFieldTouched = useCallback((name) => {
+    setTouched(prev => ({ ...prev, [name]: true }));
+  }, []);
+  
+  const validateForm = useCallback(() => {
+    if (!validate) return true;
+    
+    const formErrors = validate(values);
+    setErrors(formErrors);
+    setTouched(
+      Object.keys(values).reduce((acc, key) => {
+        acc[key] = true;
+        return acc;
+      }, {})
+    );
+    return Object.keys(formErrors).length === 0;
+  }, [values, validate]);
+  
+  const resetForm = useCallback(() => {
+    setValues(initialValues);
+    setErrors({});
+    setTouched({});
+  }, [initialValues]);
+  
+  return {
+    values,
+    errors,
+    touched,
+    setValue,
+    setFieldTouched,
+    validateForm,
+    resetForm
+  };
+}
+```
+
+### 30. Redux的原理是什么？如何实现一个简化版的Redux？
+
+**答案：**
+
+**Redux核心原理：**
+```javascript
+// 1. Store
+function createStore(reducer, initialState) {
+  let state = initialState;
+  let listeners = [];
+  
+  const getState = () => state;
+  
+  const dispatch = (action) => {
+    state = reducer(state, action);
+    listeners.forEach(listener => listener());
+    return action;
+  };
+  
+  const subscribe = (listener) => {
+    listeners.push(listener);
+    return () => {
+      listeners = listeners.filter(l => l !== listener);
+    };
+  };
+  
+  return { getState, dispatch, subscribe };
+}
+
+// 2. Reducer
+function counterReducer(state = { count: 0 }, action) {
+  switch (action.type) {
+    case 'INCREMENT':
+      return { ...state, count: state.count + 1 };
+    case 'DECREMENT':
+      return { ...state, count: state.count - 1 };
+    default:
+      return state;
+  }
+}
+
+// 3. 使用
+const store = createStore(counterReducer, { count: 0 });
+
+store.subscribe(() => {
+  console.log('State:', store.getState());
+});
+
+store.dispatch({ type: 'INCREMENT' });
+store.dispatch({ type: 'DECREMENT' });
+```
+
+**React-Redux实现：**
+```javascript
+// Provider
+const ReduxContext = createContext();
+
+function Provider({ store, children }) {
+  return (
+    <ReduxContext.Provider value={store}>
+      {children}
+    </ReduxContext.Provider>
+  );
+}
+
+// useSelector
+function useSelector(selector) {
+  const store = useContext(ReduxContext);
+  const [state, setState] = useState(() => selector(store.getState()));
+  
+  useEffect(() => {
+    const unsubscribe = store.subscribe(() => {
+      const newState = selector(store.getState());
+      setState(newState);
+    });
+    
+    return unsubscribe;
+  }, [store, selector]);
+  
+  return state;
+}
+
+// useDispatch
+function useDispatch() {
+  const store = useContext(ReduxContext);
+  return store.dispatch;
+}
+```
+
+### 31. 错误边界（Error Boundary）如何实现？如何进行错误上报和降级？
+
+**答案：**
+
+**错误边界实现：**
+```javascript
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  
+  componentDidCatch(error, errorInfo) {
+    // 错误上报
+    this.logErrorToService(error, errorInfo);
+  }
+  
+  logErrorToService(error, errorInfo) {
+    // 发送到错误监控服务
+    fetch('/api/errors', {
+      method: 'POST',
+      body: JSON.stringify({
+        error: error.toString(),
+        errorInfo,
+        timestamp: new Date().toISOString()
+      })
+    });
+  }
+  
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback || <ErrorFallback error={this.state.error} />;
+    }
+    
+    return this.props.children;
+  }
+}
+
+// 使用
+function App() {
+  return (
+    <ErrorBoundary fallback={<ErrorPage />}>
+      <ComponentTree />
+    </ErrorBoundary>
+  );
+}
+```
+
+**错误上报Hook：**
+```javascript
+function useErrorHandler() {
+  const [error, setError] = useState(null);
+  
+  useEffect(() => {
+    if (error) {
+      // 上报错误
+      reportError(error);
+      throw error;
+    }
+  }, [error]);
+  
+  return setError;
+}
+
+function reportError(error) {
+  // 发送到监控服务
+  const errorInfo = {
+    message: error.message,
+    stack: error.stack,
+    url: window.location.href,
+    userAgent: navigator.userAgent,
+    timestamp: new Date().toISOString()
+  };
+  
+  // 发送到后端
+  fetch('/api/errors', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(errorInfo)
+  });
+}
+```
+
+### 32. 大型React项目的架构设计原则是什么？如何组织目录结构？
+
+**答案：**
+
+**目录结构：**
+```
+src/
+├── components/          # 通用组件
+│   ├── Button/
+│   │   ├── Button.tsx
+│   │   ├── Button.test.tsx
+│   │   └── index.ts
+│   └── Input/
+├── features/            # 功能模块
+│   ├── auth/
+│   │   ├── components/
+│   │   ├── hooks/
+│   │   ├── services/
+│   │   └── types.ts
+│   └── dashboard/
+├── pages/               # 页面组件
+│   ├── Home/
+│   └── About/
+├── hooks/              # 全局Hooks
+├── utils/              # 工具函数
+├── services/           # API服务
+├── store/             # 状态管理
+├── types/             # TypeScript类型
+└── App.tsx
+```
+
+**架构原则：**
+```javascript
+// 1. 功能模块化
+// features/auth/components/LoginForm.tsx
+export function LoginForm() {
+  // 认证相关组件
+}
+
+// 2. 组件分层
+// components/ - 通用UI组件
+// features/ - 业务组件
+// pages/ - 页面组件
+
+// 3. 关注点分离
+// components/Button/Button.tsx - UI
+// hooks/useAuth.ts - 逻辑
+// services/auth.ts - API调用
+
+// 4. 依赖方向
+// pages -> features -> components
+// 避免循环依赖
+```
+
+### 33. 微前端架构如何实现？qiankun的原理是什么？
+
+**答案：**
+
+**qiankun原理：**
+```javascript
+// 主应用
+import { registerMicroApps, start } from 'qiankun';
+
+registerMicroApps([
+  {
+    name: 'react-app',
+    entry: '//localhost:7100',
+    container: '#subapp-viewport',
+    activeRule: '/react'
+  },
+  {
+    name: 'vue-app',
+    entry: '//localhost:7101',
+    container: '#subapp-viewport',
+    activeRule: '/vue'
+  }
+]);
+
+start();
+
+// 子应用（React）
+// 导出生命周期函数
+export async function bootstrap() {
+  console.log('React app bootstrapped');
+}
+
+export async function mount(props) {
+  ReactDOM.render(<App />, props.container || document.getElementById('root'));
+}
+
+export async function unmount(props) {
+  ReactDOM.unmountComponentAtNode(props.container || document.getElementById('root'));
+}
+
+// 样式隔离
+// qiankun使用Shadow DOM或CSS Scope实现样式隔离
+```
+
+**模块联邦（Webpack 5）：**
+```javascript
+// 主应用 webpack.config.js
+module.exports = {
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'host',
+      remotes: {
+        remote: 'remote@http://localhost:3001/remoteEntry.js'
+      }
+    })
+  ]
+};
+
+// 子应用
+module.exports = {
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'remote',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './Button': './src/Button'
+      }
+    })
+  ]
+};
+
+// 使用
+const RemoteButton = React.lazy(() => import('remote/Button'));
+```
+
+### 34. React性能监控如何实现？如何使用React Profiler？
+
+**答案：**
+
+**React Profiler：**
+```javascript
+import { Profiler } from 'react';
+
+function onRenderCallback(id, phase, actualDuration) {
+  console.log('Component:', id);
+  console.log('Phase:', phase); // mount 或 update
+  console.log('Duration:', actualDuration);
+}
+
+function App() {
+  return (
+    <Profiler id="App" onRender={onRenderCallback}>
+      <ComponentTree />
+    </Profiler>
+  );
+}
+
+// 性能指标采集
+function usePerformanceMetrics() {
+  useEffect(() => {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.entryType === 'measure') {
+          console.log('Measure:', entry.name, entry.duration);
+        }
+      }
+    });
+    
+    observer.observe({ entryTypes: ['measure'] });
+    
+    return () => observer.disconnect();
+  }, []);
+}
+
+// 自定义性能Hook
+function useRenderTime(componentName) {
+  useEffect(() => {
+    const startTime = performance.now();
+    
+    return () => {
+      const endTime = performance.now();
+      const renderTime = endTime - startTime;
+      console.log(`${componentName} render time:`, renderTime);
+    };
+  });
+}
+```
+
+### 35. React测试策略是什么？如何编写单元测试和集成测试？
+
+**答案：**
+
+**单元测试：**
+```javascript
+import { render, screen, fireEvent } from '@testing-library/react';
+import { Button } from './Button';
+
+test('renders button', () => {
+  render(<Button>Click me</Button>);
+  const button = screen.getByText('Click me');
+  expect(button).toBeInTheDocument();
+});
+
+test('handles click', () => {
+  const handleClick = jest.fn();
+  render(<Button onClick={handleClick}>Click me</Button>);
+  
+  fireEvent.click(screen.getByText('Click me'));
+  expect(handleClick).toHaveBeenCalledTimes(1);
+});
+```
+
+**Hooks测试：**
+```javascript
+import { renderHook, act } from '@testing-library/react';
+import { useCounter } from './useCounter';
+
+test('increments counter', () => {
+  const { result } = renderHook(() => useCounter());
+  
+  act(() => {
+    result.current.increment();
+  });
+  
+  expect(result.current.count).toBe(1);
+});
+```
+
+**集成测试：**
+```javascript
+import { render, screen, waitFor } from '@testing-library/react';
+import { App } from './App';
+
+test('loads and displays data', async () => {
+  render(<App />);
+  
+  await waitFor(() => {
+    expect(screen.getByText('Data loaded')).toBeInTheDocument();
+  });
+});
+```
+
+---
