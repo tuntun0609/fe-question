@@ -2513,6 +2513,2607 @@ safeGet(obj, 'user.age', 0); // 0
 
 ---
 
+## 高级主题
+
+### 17. V8引擎的执行机制是什么？解释器、编译器、内联缓存和隐藏类的作用？
+
+**答案：**
+
+**V8引擎架构：**
+
+V8是Google开发的JavaScript引擎，采用解释器和编译器并存的架构。
+
+**1. 解释器（Ignition）：**
+- 快速启动，直接执行字节码
+- 生成中间代码（字节码），便于优化
+- 适合代码首次执行
+
+**2. 编译器（TurboFan）：**
+- 将热点代码编译为机器码
+- 基于类型反馈进行优化
+- 适合频繁执行的代码
+
+**执行流程：**
+```javascript
+// 1. 源代码解析
+const code = `
+function add(a, b) {
+  return a + b;
+}
+add(1, 2);
+`;
+
+// 2. 生成AST（抽象语法树）
+// 3. Ignition生成字节码
+// 4. 执行字节码，收集类型信息
+// 5. TurboFan编译热点函数为机器码
+
+// 优化示例
+function sum(arr) {
+  let total = 0;
+  for (let i = 0; i < arr.length; i++) {
+    total += arr[i]; // 类型稳定时会被优化
+  }
+  return total;
+}
+
+// 第一次执行：解释执行，收集类型信息
+sum([1, 2, 3]); // 数组元素都是number
+
+// 多次执行后：TurboFan编译为优化的机器码
+for (let i = 0; i < 10000; i++) {
+  sum([1, 2, 3]); // 编译后的机器码执行
+}
+```
+
+**3. 内联缓存（Inline Cache, IC）：**
+```javascript
+// IC用于缓存对象属性访问
+function getValue(obj) {
+  return obj.value; // IC缓存属性位置
+}
+
+const obj1 = { value: 1 }; // Shape A
+const obj2 = { value: 2 }; // Shape A（相同shape）
+const obj3 = { value: 3, extra: true }; // Shape B（不同shape）
+
+getValue(obj1); // IC miss，记录Shape A和属性位置
+getValue(obj2); // IC hit，直接访问（快速）
+getValue(obj3); // IC miss，Shape不同，重新查找
+
+// 优化：保持对象结构一致
+function createUser(name, age) {
+  // ✅ 好的：结构一致
+  return { name, age };
+  
+  // ❌ 差的：结构不一致
+  // return age > 18 ? { name, age, adult: true } : { name, age };
+}
+```
+
+**4. 隐藏类（Hidden Class/Shape）：**
+```javascript
+// V8为每个对象结构创建隐藏类
+function Point(x, y) {
+  this.x = x; // 创建隐藏类C0
+  this.y = y; // 转换为隐藏类C1
+}
+
+const p1 = new Point(1, 2);
+const p2 = new Point(3, 4);
+
+// p1和p2共享相同的隐藏类，访问属性更快
+
+// ❌ 破坏隐藏类优化
+function BadPoint(x, y) {
+  this.x = x;
+  this.y = y;
+}
+
+const p3 = new BadPoint(1, 2);
+p3.z = 3; // 改变隐藏类，导致优化失效
+
+// ✅ 保持隐藏类稳定
+function GoodPoint(x, y, z) {
+  this.x = x;
+  this.y = y;
+  this.z = z || 0; // 始终初始化所有属性
+}
+```
+
+**优化建议：**
+```javascript
+// 1. 保持对象结构一致
+const users = [
+  { name: 'Alice', age: 25 }, // Shape A
+  { name: 'Bob', age: 30 },   // Shape A（相同）
+];
+
+// 2. 避免动态添加属性
+// ❌ 差
+const obj = {};
+obj.a = 1;
+obj.b = 2;
+
+// ✅ 好
+const obj = { a: 1, b: 2 };
+
+// 3. 使用数组而非对象存储同类型数据
+// ❌ 差：对象数组，属性访问慢
+const data = [{ x: 1 }, { x: 2 }, { x: 3 }];
+
+// ✅ 好：数组，访问快
+const xs = [1, 2, 3];
+
+// 4. 避免类型混用
+// ❌ 差：类型不稳定
+function process(value) {
+  return value + 1; // value可能是number或string
+}
+
+// ✅ 好：类型稳定
+function processNumber(value) {
+  return value + 1; // value始终是number
+}
+```
+
+### 18. JavaScript的内存管理和垃圾回收机制是什么？如何检测和预防内存泄漏？
+
+**答案：**
+
+**内存管理：**
+
+JavaScript使用自动垃圾回收（Garbage Collection），开发者不需要手动管理内存。
+
+**1. 垃圾回收算法：**
+
+**标记清除（Mark-and-Sweep）：**
+```javascript
+// V8主要使用标记清除算法
+function example() {
+  const obj1 = { name: 'Alice' };
+  const obj2 = { name: 'Bob' };
+  
+  obj1.friend = obj2;
+  obj2.friend = obj1;
+  
+  return 'done';
+}
+
+// 执行后：
+// 1. 标记：从根对象（全局对象、调用栈）开始标记可达对象
+// 2. 清除：清除未标记的对象
+// 3. 整理：整理内存碎片（可选）
+```
+
+**分代回收（Generational Collection）：**
+```javascript
+// V8将堆分为新生代和老生代
+// 新生代：新创建的对象，使用Scavenge算法（复制算法）
+// 老生代：存活时间长的对象，使用标记清除/标记整理
+
+function createObjects() {
+  const temp = []; // 新生代
+  for (let i = 0; i < 1000; i++) {
+    temp.push({ id: i }); // 大部分很快被回收
+  }
+  
+  const persistent = { data: temp }; // 晋升到老生代
+  return persistent;
+}
+```
+
+**增量标记（Incremental Marking）：**
+```javascript
+// 将标记过程分成多个小步骤，避免长时间阻塞
+// 与主线程交替执行，保持响应性
+```
+
+**2. 内存泄漏常见场景：**
+
+**场景1：全局变量**
+```javascript
+// ❌ 泄漏：意外创建全局变量
+function leak() {
+  name = 'Global'; // 没有var/let/const，成为全局变量
+  this.age = 25; // 在非严格模式下，this指向全局对象
+}
+
+// ✅ 修复
+function noLeak() {
+  const name = 'Local';
+  let age = 25;
+}
+```
+
+**场景2：闭包引用**
+```javascript
+// ❌ 泄漏：闭包持有大对象引用
+function createHandler() {
+  const largeData = new Array(1000000).fill(0);
+  
+  return function handleClick() {
+    console.log('clicked');
+    // largeData一直被引用，无法回收
+  };
+}
+
+// ✅ 修复：使用后清除引用
+function createHandlerFixed() {
+  const largeData = new Array(1000000).fill(0);
+  
+  const handler = function handleClick() {
+    console.log('clicked');
+  };
+  
+  // 使用后清除
+  handler.cleanup = function() {
+    largeData.length = 0;
+  };
+  
+  return handler;
+}
+```
+
+**场景3：DOM引用**
+```javascript
+// ❌ 泄漏：DOM元素被JavaScript引用
+const elements = [];
+function addElement() {
+  const div = document.createElement('div');
+  document.body.appendChild(div);
+  elements.push(div); // 即使移除DOM，仍被引用
+}
+
+// ✅ 修复：移除时清除引用
+function addElementFixed() {
+  const div = document.createElement('div');
+  document.body.appendChild(div);
+  elements.push(div);
+  
+  // 移除时清理
+  function removeElement() {
+    const index = elements.indexOf(div);
+    if (index > -1) {
+      elements.splice(index, 1);
+      div.remove();
+    }
+  }
+}
+```
+
+**场景4：事件监听器**
+```javascript
+// ❌ 泄漏：未移除事件监听器
+class Component {
+  constructor() {
+    this.handleResize = () => {
+      console.log('resized');
+    };
+    window.addEventListener('resize', this.handleResize);
+  }
+  // 组件销毁时未移除监听器
+}
+
+// ✅ 修复：清理事件监听器
+class ComponentFixed {
+  constructor() {
+    this.handleResize = () => {
+      console.log('resized');
+    };
+    window.addEventListener('resize', this.handleResize);
+  }
+  
+  destroy() {
+    window.removeEventListener('resize', this.handleResize);
+  }
+}
+```
+
+**场景5：定时器**
+```javascript
+// ❌ 泄漏：未清除定时器
+function startTimer() {
+  setInterval(() => {
+    console.log('tick');
+  }, 1000);
+  // 定时器一直运行
+}
+
+// ✅ 修复：保存引用并清除
+function startTimerFixed() {
+  const timerId = setInterval(() => {
+    console.log('tick');
+  }, 1000);
+  
+  // 需要时清除
+  return () => clearInterval(timerId);
+}
+```
+
+**3. 内存泄漏检测：**
+
+**Chrome DevTools：**
+```javascript
+// 1. Performance Monitor
+// 打开DevTools -> More tools -> Performance Monitor
+// 观察JS Heap Size、DOM Nodes等指标
+
+// 2. Memory Profiler
+// 打开DevTools -> Memory -> Heap Snapshot
+// 对比多个快照，查找内存增长
+
+// 3. Performance录制
+// 录制一段时间，观察内存趋势
+
+// 代码中检测
+function checkMemory() {
+  if (performance.memory) {
+    const used = performance.memory.usedJSHeapSize;
+    const total = performance.memory.totalJSHeapSize;
+    const limit = performance.memory.jsHeapSizeLimit;
+    
+    console.log(`Used: ${(used / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`Total: ${(total / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`Limit: ${(limit / 1024 / 1024).toFixed(2)} MB`);
+  }
+}
+
+// 定期检查
+setInterval(checkMemory, 5000);
+```
+
+**WeakMap和WeakSet：**
+```javascript
+// WeakMap/WeakSet的键是弱引用，不会阻止垃圾回收
+const weakMap = new WeakMap();
+
+function storeData(element, data) {
+  weakMap.set(element, data);
+  // element被回收时，对应的数据也会被回收
+}
+
+// 使用场景：DOM元素关联数据
+const element = document.getElementById('myElement');
+storeData(element, { count: 0 });
+
+// element被移除后，数据自动回收
+element.remove();
+```
+
+**4. 内存优化实践：**
+
+```javascript
+// 1. 及时清理引用
+class DataManager {
+  constructor() {
+    this.cache = new Map();
+    this.listeners = [];
+  }
+  
+  cleanup() {
+    this.cache.clear();
+    this.listeners.forEach(listener => {
+      listener.remove();
+    });
+    this.listeners = [];
+  }
+}
+
+// 2. 使用对象池
+class ObjectPool {
+  constructor(createFn, resetFn) {
+    this.createFn = createFn;
+    this.resetFn = resetFn;
+    this.pool = [];
+  }
+  
+  acquire() {
+    return this.pool.length > 0
+      ? this.pool.pop()
+      : this.createFn();
+  }
+  
+  release(obj) {
+    this.resetFn(obj);
+    this.pool.push(obj);
+  }
+}
+
+// 使用对象池
+const vectorPool = new ObjectPool(
+  () => ({ x: 0, y: 0 }),
+  (vec) => { vec.x = 0; vec.y = 0; }
+);
+
+// 3. 避免创建大量临时对象
+// ❌ 差：每次创建新对象
+function processItems(items) {
+  return items.map(item => ({
+    ...item,
+    processed: true
+  }));
+}
+
+// ✅ 好：复用对象
+function processItemsOptimized(items) {
+  const result = [];
+  const template = { processed: true };
+  items.forEach(item => {
+    result.push({ ...item, ...template });
+  });
+  return result;
+}
+```
+
+### 19. Node.js事件循环的6个阶段是什么？与浏览器事件循环有什么区别？
+
+**答案：**
+
+**Node.js事件循环6个阶段：**
+
+```javascript
+// Node.js事件循环阶段（libuv实现）
+// ┌───────────────────────────┐
+// │   timers（定时器阶段）     │ 执行setTimeout和setInterval回调
+// ├───────────────────────────┤
+// │ pending callbacks         │ 执行延迟的I/O回调
+// ├───────────────────────────┤
+// │ idle, prepare             │ 内部使用
+// ├───────────────────────────┤
+// │   poll（轮询阶段）         │ 获取新的I/O事件，执行I/O回调
+// ├───────────────────────────┤
+// │   check（检查阶段）         │ 执行setImmediate回调
+// ├───────────────────────────┤
+// │ close callbacks           │ 执行close事件回调
+// └───────────────────────────┘
+```
+
+**详细阶段说明：**
+
+**1. Timers阶段：**
+```javascript
+// 执行到期的setTimeout和setInterval回调
+setTimeout(() => {
+  console.log('timeout 1');
+}, 0);
+
+setInterval(() => {
+  console.log('interval');
+}, 100);
+```
+
+**2. Pending Callbacks阶段：**
+```javascript
+// 执行延迟的I/O回调（如TCP错误回调）
+// 通常不需要关心
+```
+
+**3. Poll阶段：**
+```javascript
+// 最重要的阶段
+// 1. 计算应该阻塞多长时间以等待I/O
+// 2. 处理poll队列中的事件
+
+const fs = require('fs');
+
+fs.readFile('file.txt', (err, data) => {
+  // 这个回调在poll阶段执行
+  console.log('file read');
+});
+```
+
+**4. Check阶段：**
+```javascript
+// 执行setImmediate回调
+setImmediate(() => {
+  console.log('immediate');
+});
+```
+
+**5. Close Callbacks阶段：**
+```javascript
+// 执行close事件回调
+const server = require('http').createServer();
+
+server.on('close', () => {
+  console.log('server closed');
+});
+```
+
+**执行顺序示例：**
+```javascript
+console.log('1. Start');
+
+setTimeout(() => {
+  console.log('2. setTimeout');
+}, 0);
+
+setImmediate(() => {
+  console.log('3. setImmediate');
+});
+
+process.nextTick(() => {
+  console.log('4. nextTick');
+});
+
+Promise.resolve().then(() => {
+  console.log('5. Promise');
+});
+
+console.log('6. End');
+
+// 输出顺序：
+// 1. Start
+// 6. End
+// 4. nextTick        // nextTick优先级最高
+// 5. Promise         // 微任务
+// 2. setTimeout      // 宏任务（timers阶段）
+// 3. setImmediate    // 宏任务（check阶段）
+```
+
+**process.nextTick和微任务：**
+```javascript
+// nextTick队列优先级高于微任务队列
+process.nextTick(() => {
+  console.log('nextTick 1');
+});
+
+Promise.resolve().then(() => {
+  console.log('Promise 1');
+});
+
+process.nextTick(() => {
+  console.log('nextTick 2');
+});
+
+Promise.resolve().then(() => {
+  console.log('Promise 2');
+});
+
+// 输出：
+// nextTick 1
+// nextTick 2
+// Promise 1
+// Promise 2
+```
+
+**Node.js vs 浏览器事件循环：**
+
+| 特性 | Node.js | 浏览器 |
+|------|---------|--------|
+| 阶段数 | 6个阶段 | 2个队列（宏任务、微任务） |
+| 宏任务 | timers、poll、check等 | setTimeout、setInterval、I/O等 |
+| 微任务 | Promise、queueMicrotask | Promise、MutationObserver |
+| 特殊队列 | process.nextTick | 无 |
+| I/O处理 | 异步非阻塞 | 异步（Web API） |
+
+**浏览器事件循环：**
+```javascript
+// 浏览器事件循环（简化）
+// 1. 执行同步代码
+// 2. 执行微任务队列（全部执行完）
+// 3. 执行一个宏任务
+// 4. 重复步骤2-3
+
+console.log('1');
+
+setTimeout(() => {
+  console.log('2');
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log('3');
+});
+
+console.log('4');
+
+// 浏览器输出：1, 4, 3, 2
+// Node.js输出：1, 4, 3, 2（相同）
+```
+
+**复杂场景：**
+```javascript
+// Node.js中的执行顺序
+setTimeout(() => console.log('timeout'), 0);
+setImmediate(() => console.log('immediate'));
+
+// 输出顺序不确定！
+// 取决于事件循环启动时是否已经过了1ms
+
+// 在I/O回调中，顺序确定
+const fs = require('fs');
+fs.readFile(__filename, () => {
+  setTimeout(() => console.log('timeout'), 0);
+  setImmediate(() => console.log('immediate'));
+  // 输出：immediate, timeout（确定）
+});
+```
+
+### 20. 微任务和宏任务的执行顺序是什么？复杂场景下如何分析？
+
+**答案：**
+
+**基本规则：**
+1. 同步代码优先执行
+2. 微任务队列全部执行完
+3. 执行一个宏任务
+4. 重复步骤2-3
+
+**基础示例：**
+```javascript
+console.log('1'); // 同步
+
+setTimeout(() => {
+  console.log('2'); // 宏任务
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log('3'); // 微任务
+});
+
+console.log('4'); // 同步
+
+// 输出：1, 4, 3, 2
+```
+
+**复杂场景1：嵌套Promise**
+```javascript
+console.log('1');
+
+Promise.resolve().then(() => {
+  console.log('2');
+  Promise.resolve().then(() => {
+    console.log('3');
+  });
+  console.log('4');
+});
+
+Promise.resolve().then(() => {
+  console.log('5');
+});
+
+console.log('6');
+
+// 执行过程：
+// 1. 同步：1, 6
+// 2. 微任务队列：[Promise1, Promise2]
+// 3. 执行Promise1：输出2, 4，添加Promise3到微任务队列
+// 4. 执行Promise2：输出5
+// 5. 执行Promise3：输出3
+// 输出：1, 6, 2, 4, 5, 3
+```
+
+**复杂场景2：async/await**
+```javascript
+async function async1() {
+  console.log('1');
+  await async2();
+  console.log('2');
+}
+
+async function async2() {
+  console.log('3');
+}
+
+console.log('4');
+
+async1();
+
+new Promise(resolve => {
+  console.log('5');
+  resolve();
+}).then(() => {
+  console.log('6');
+});
+
+console.log('7');
+
+// 执行过程：
+// 1. 同步：4
+// 2. 调用async1，同步：1
+// 3. await async2()，调用async2，同步：3
+// 4. await后面的代码加入微任务队列
+// 5. 同步：5, 7
+// 6. 微任务：[async1的await后, Promise.then]
+// 7. 执行微任务：2, 6
+// 输出：4, 1, 3, 5, 7, 2, 6
+```
+
+**复杂场景3：混合宏任务和微任务**
+```javascript
+console.log('1');
+
+setTimeout(() => {
+  console.log('2');
+  Promise.resolve().then(() => {
+    console.log('3');
+  });
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log('4');
+  setTimeout(() => {
+    console.log('5');
+  }, 0);
+});
+
+console.log('6');
+
+// 执行过程：
+// 1. 同步：1, 6
+// 2. 微任务：[Promise.then]
+// 3. 执行微任务：4，添加setTimeout到宏任务队列
+// 4. 宏任务队列：[setTimeout1, setTimeout2]
+// 5. 执行setTimeout1：2，添加Promise到微任务队列
+// 6. 执行微任务：3
+// 7. 执行setTimeout2：5
+// 输出：1, 6, 4, 2, 3, 5
+```
+
+**复杂场景4：多个setTimeout**
+```javascript
+console.log('1');
+
+setTimeout(() => {
+  console.log('2');
+}, 0);
+
+setTimeout(() => {
+  console.log('3');
+  Promise.resolve().then(() => {
+    console.log('4');
+  });
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log('5');
+});
+
+console.log('6');
+
+// 执行过程：
+// 1. 同步：1, 6
+// 2. 微任务：[Promise.then]
+// 3. 执行微任务：5
+// 4. 宏任务队列：[setTimeout1, setTimeout2]
+// 5. 执行setTimeout1：2
+// 6. 执行setTimeout2：3，添加Promise到微任务队列
+// 7. 执行微任务：4
+// 输出：1, 6, 5, 2, 3, 4
+```
+
+**复杂场景5：requestAnimationFrame**
+```javascript
+// 浏览器环境
+console.log('1');
+
+setTimeout(() => {
+  console.log('2');
+}, 0);
+
+requestAnimationFrame(() => {
+  console.log('3');
+  Promise.resolve().then(() => {
+    console.log('4');
+  });
+});
+
+Promise.resolve().then(() => {
+  console.log('5');
+});
+
+console.log('6');
+
+// 执行过程：
+// 1. 同步：1, 6
+// 2. 微任务：[Promise.then]
+// 3. 执行微任务：5
+// 4. 宏任务：setTimeout -> 2
+// 5. 下一帧：requestAnimationFrame -> 3
+// 6. 微任务：4
+// 输出：1, 6, 5, 2, 3, 4
+```
+
+**分析技巧：**
+```javascript
+// 1. 先执行所有同步代码
+// 2. 将微任务加入队列
+// 3. 将宏任务加入队列
+// 4. 执行所有微任务（包括执行过程中新加入的）
+// 5. 执行一个宏任务
+// 6. 重复步骤4-5
+
+function analyze() {
+  console.log('同步1');
+  
+  setTimeout(() => {
+    console.log('宏任务1');
+  }, 0);
+  
+  Promise.resolve().then(() => {
+    console.log('微任务1');
+    setTimeout(() => {
+      console.log('宏任务2');
+    }, 0);
+  });
+  
+  console.log('同步2');
+}
+
+analyze();
+// 输出：同步1, 同步2, 微任务1, 宏任务1, 宏任务2
+```
+
+### 21. CommonJS和ES Module的区别是什么？如何处理循环依赖？
+
+**答案：**
+
+**CommonJS vs ES Module：**
+
+| 特性 | CommonJS | ES Module |
+|------|----------|-----------|
+| 加载时机 | 运行时加载 | 编译时加载 |
+| 输出方式 | 值的拷贝 | 值的引用 |
+| 动态性 | 支持动态require | 静态分析，支持动态import |
+| 顶层this | 指向模块对象 | undefined |
+| 循环依赖 | 可能有问题 | 支持循环依赖 |
+
+**CommonJS示例：**
+```javascript
+// a.js
+const { b } = require('./b');
+console.log('a.js', b);
+module.exports = { a: 1 };
+
+// b.js
+const { a } = require('./a');
+console.log('b.js', a); // undefined（循环依赖问题）
+module.exports = { b: 2 };
+
+// 执行node a.js
+// 输出：
+// b.js undefined
+// a.js 2
+```
+
+**ES Module示例：**
+```javascript
+// a.mjs
+import { b } from './b.mjs';
+console.log('a.mjs', b);
+export const a = 1;
+
+// b.mjs
+import { a } from './a.mjs';
+console.log('b.mjs', a); // 1（支持循环依赖）
+export const b = 2;
+
+// 执行node a.mjs
+// 输出：
+// b.mjs 1
+// a.mjs 2
+```
+
+**循环依赖处理：**
+
+**CommonJS循环依赖：**
+```javascript
+// 问题：模块加载时，未完成的导出是undefined
+
+// counter.js
+let count = 0;
+const { increment } = require('./increment');
+module.exports = { count, increment };
+
+// increment.js
+const { count } = require('./counter');
+module.exports = {
+  increment: () => {
+    // count是undefined，因为counter.js还没执行完
+    console.log(count);
+  }
+};
+
+// 解决方案1：延迟require
+// counter.js
+let count = 0;
+module.exports = {
+  get count() {
+    return count;
+  },
+  increment: () => {
+    const { increment } = require('./increment');
+    return increment();
+  }
+};
+
+// 解决方案2：使用函数导出
+// counter.js
+let count = 0;
+module.exports = {
+  getCount: () => count,
+  setCount: (val) => { count = val; }
+};
+```
+
+**ES Module循环依赖：**
+```javascript
+// ES Module天然支持循环依赖，因为：
+// 1. 编译时建立模块图
+// 2. 导出的是引用，不是值
+
+// a.mjs
+import { b } from './b.mjs';
+export const a = 1;
+console.log('a.mjs', b);
+
+// b.mjs
+import { a } from './a.mjs';
+export const b = 2;
+console.log('b.mjs', a);
+
+// 执行顺序：
+// 1. 解析a.mjs，发现依赖b.mjs
+// 2. 解析b.mjs，发现依赖a.mjs（循环）
+// 3. 建立绑定：a -> a.mjs的a，b -> b.mjs的b
+// 4. 执行a.mjs：a = 1，输出b（此时b是2）
+// 5. 执行b.mjs：b = 2，输出a（此时a是1）
+```
+
+**动态import：**
+```javascript
+// ES Module支持动态import
+async function loadModule() {
+  const module = await import('./module.mjs');
+  return module.default;
+}
+
+// 条件加载
+if (condition) {
+  const moduleA = await import('./moduleA.mjs');
+} else {
+  const moduleB = await import('./moduleB.mjs');
+}
+
+// 动态路径
+const moduleName = './modules/' + name + '.mjs';
+const module = await import(moduleName);
+```
+
+**Tree Shaking原理：**
+```javascript
+// Tree Shaking：移除未使用的代码
+
+// utils.js
+export function used() {
+  return 'used';
+}
+
+export function unused() {
+  return 'unused';
+}
+
+// main.js
+import { used } from './utils.js';
+// unused函数会被Tree Shaking移除
+
+// 条件：
+// 1. 使用ES Module
+// 2. 静态分析（不能动态import）
+// 3. 标记副作用（sideEffects: false）
+```
+
+### 22. Symbol、WeakMap和WeakSet的应用场景是什么？
+
+**答案：**
+
+**Symbol应用场景：**
+
+**1. 唯一属性名：**
+```javascript
+// 避免属性名冲突
+const ID = Symbol('id');
+const user = {
+  [ID]: 123,
+  name: 'John'
+};
+
+// 外部无法访问
+console.log(user[ID]); // 123
+console.log(Object.keys(user)); // ['name']，不包含ID
+```
+
+**2. 私有属性模拟：**
+```javascript
+const _name = Symbol('name');
+const _age = Symbol('age');
+
+class Person {
+  constructor(name, age) {
+    this[_name] = name;
+    this[_age] = age;
+  }
+  
+  getName() {
+    return this[_name];
+  }
+}
+
+const person = new Person('Alice', 25);
+console.log(person.getName()); // 'Alice'
+console.log(person[_name]); // 'Alice'（仍可访问，但需要Symbol引用）
+```
+
+**3. 内置Symbol：**
+```javascript
+// Symbol.iterator：使对象可迭代
+class Collection {
+  constructor(items) {
+    this.items = items;
+  }
+  
+  [Symbol.iterator]() {
+    let index = 0;
+    return {
+      next: () => {
+        if (index < this.items.length) {
+          return { value: this.items[index++], done: false };
+        }
+        return { done: true };
+      }
+    };
+  }
+}
+
+const collection = new Collection([1, 2, 3]);
+for (const item of collection) {
+  console.log(item); // 1, 2, 3
+}
+
+// Symbol.toPrimitive：自定义类型转换
+class Money {
+  constructor(amount) {
+    this.amount = amount;
+  }
+  
+  [Symbol.toPrimitive](hint) {
+    if (hint === 'number') {
+      return this.amount;
+    }
+    if (hint === 'string') {
+      return `$${this.amount}`;
+    }
+    return this.amount;
+  }
+}
+
+const money = new Money(100);
+console.log(+money); // 100
+console.log(String(money)); // '$100'
+```
+
+**WeakMap应用场景：**
+
+**1. 私有数据存储：**
+```javascript
+// WeakMap键必须是对象，且是弱引用
+const privateData = new WeakMap();
+
+class User {
+  constructor(name) {
+    privateData.set(this, { name });
+  }
+  
+  getName() {
+    return privateData.get(this).name;
+  }
+}
+
+const user = new User('Alice');
+console.log(user.getName()); // 'Alice'
+
+// user被回收时，privateData中的对应数据也会被回收
+```
+
+**2. DOM元素关联数据：**
+```javascript
+// 不阻止DOM元素被垃圾回收
+const elementData = new WeakMap();
+
+function attachData(element, data) {
+  elementData.set(element, data);
+}
+
+function getData(element) {
+  return elementData.get(element);
+}
+
+const div = document.createElement('div');
+attachData(div, { count: 0 });
+
+// div被移除后，数据自动回收
+div.remove();
+```
+
+**3. 缓存计算结果：**
+```javascript
+// 缓存函数计算结果，对象被回收时缓存也回收
+const cache = new WeakMap();
+
+function expensiveOperation(obj) {
+  if (cache.has(obj)) {
+    return cache.get(obj);
+  }
+  
+  const result = /* 复杂计算 */ obj.value * 2;
+  cache.set(obj, result);
+  return result;
+}
+```
+
+**WeakSet应用场景：**
+
+**1. 标记对象：**
+```javascript
+// 标记已处理的对象
+const processed = new WeakSet();
+
+function processObject(obj) {
+  if (processed.has(obj)) {
+    return; // 已处理
+  }
+  
+  // 处理对象
+  processed.add(obj);
+}
+
+const obj1 = { id: 1 };
+processObject(obj1);
+processObject(obj1); // 不会重复处理
+```
+
+**2. 防止循环引用：**
+```javascript
+// 检测对象是否在循环引用中
+function deepClone(obj, visited = new WeakSet()) {
+  if (typeof obj !== 'object' || obj === null) {
+    return obj;
+  }
+  
+  if (visited.has(obj)) {
+    throw new Error('Circular reference detected');
+  }
+  
+  visited.add(obj);
+  
+  const clone = Array.isArray(obj) ? [] : {};
+  for (const key in obj) {
+    clone[key] = deepClone(obj[key], visited);
+  }
+  
+  return clone;
+}
+```
+
+**WeakMap vs Map：**
+```javascript
+// Map：强引用，阻止垃圾回收
+const map = new Map();
+let obj = { data: 'important' };
+map.set(obj, 'value');
+
+obj = null; // obj仍被map引用，不会被回收
+
+// WeakMap：弱引用，不阻止垃圾回收
+const weakMap = new WeakMap();
+let obj2 = { data: 'important' };
+weakMap.set(obj2, 'value');
+
+obj2 = null; // obj2可以被回收，weakMap中的对应项也会被回收
+```
+
+### 23. 如何实现虚拟滚动来优化大数据列表渲染？
+
+**答案：**
+
+**虚拟滚动原理：**
+只渲染可视区域内的元素，减少DOM节点数量，提高性能。
+
+**基础实现：**
+```javascript
+class VirtualScroll {
+  constructor(container, itemHeight, items, renderItem) {
+    this.container = container;
+    this.itemHeight = itemHeight;
+    this.items = items;
+    this.renderItem = renderItem;
+    
+    this.scrollTop = 0;
+    this.containerHeight = container.clientHeight;
+    this.visibleCount = Math.ceil(this.containerHeight / this.itemHeight);
+    
+    this.init();
+  }
+  
+  init() {
+    // 设置容器高度
+    this.container.style.height = `${this.containerHeight}px`;
+    this.container.style.overflow = 'auto';
+    
+    // 创建内容容器
+    this.content = document.createElement('div');
+    this.content.style.height = `${this.items.length * this.itemHeight}px`;
+    this.content.style.position = 'relative';
+    this.container.appendChild(this.content);
+    
+    // 绑定滚动事件
+    this.container.addEventListener('scroll', () => {
+      this.handleScroll();
+    });
+    
+    // 初始渲染
+    this.render();
+  }
+  
+  handleScroll() {
+    const newScrollTop = this.container.scrollTop;
+    if (newScrollTop !== this.scrollTop) {
+      this.scrollTop = newScrollTop;
+      this.render();
+    }
+  }
+  
+  render() {
+    // 计算可见范围
+    const startIndex = Math.floor(this.scrollTop / this.itemHeight);
+    const endIndex = Math.min(
+      startIndex + this.visibleCount + 1,
+      this.items.length
+    );
+    
+    // 清空内容
+    this.content.innerHTML = '';
+    
+    // 渲染可见项
+    for (let i = startIndex; i < endIndex; i++) {
+      const item = this.items[i];
+      const element = this.renderItem(item, i);
+      element.style.position = 'absolute';
+      element.style.top = `${i * this.itemHeight}px`;
+      element.style.height = `${this.itemHeight}px`;
+      element.style.width = '100%';
+      this.content.appendChild(element);
+    }
+  }
+}
+
+// 使用示例
+const container = document.getElementById('list');
+const items = Array.from({ length: 10000 }, (_, i) => ({
+  id: i,
+  name: `Item ${i}`
+}));
+
+const virtualScroll = new VirtualScroll(
+  container,
+  50, // 每项高度50px
+  items,
+  (item, index) => {
+    const div = document.createElement('div');
+    div.textContent = `${item.name}`;
+    div.className = 'list-item';
+    return div;
+  }
+);
+```
+
+**React虚拟滚动实现：**
+```javascript
+import { useState, useEffect, useRef, useMemo } from 'react';
+
+function VirtualList({ items, itemHeight, containerHeight, renderItem }) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const containerRef = useRef(null);
+  
+  const visibleRange = useMemo(() => {
+    const startIndex = Math.floor(scrollTop / itemHeight);
+    const endIndex = Math.min(
+      startIndex + Math.ceil(containerHeight / itemHeight) + 1,
+      items.length
+    );
+    return { startIndex, endIndex };
+  }, [scrollTop, itemHeight, containerHeight, items.length]);
+  
+  const visibleItems = useMemo(() => {
+    return items.slice(visibleRange.startIndex, visibleRange.endIndex);
+  }, [items, visibleRange]);
+  
+  const totalHeight = items.length * itemHeight;
+  const offsetY = visibleRange.startIndex * itemHeight;
+  
+  const handleScroll = (e) => {
+    setScrollTop(e.target.scrollTop);
+  };
+  
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        height: containerHeight,
+        overflow: 'auto'
+      }}
+      onScroll={handleScroll}
+    >
+      <div style={{ height: totalHeight, position: 'relative' }}>
+        <div
+          style={{
+            transform: `translateY(${offsetY}px)`,
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0
+          }}
+        >
+          {visibleItems.map((item, index) => (
+            <div
+              key={item.id}
+              style={{
+                height: itemHeight,
+                position: 'absolute',
+                top: (visibleRange.startIndex + index) * itemHeight,
+                left: 0,
+                right: 0
+              }}
+            >
+              {renderItem(item)}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 使用
+function App() {
+  const items = Array.from({ length: 10000 }, (_, i) => ({
+    id: i,
+    name: `Item ${i}`
+  }));
+  
+  return (
+    <VirtualList
+      items={items}
+      itemHeight={50}
+      containerHeight={400}
+      renderItem={(item) => <div>{item.name}</div>}
+    />
+  );
+}
+```
+
+**动态高度虚拟滚动：**
+```javascript
+class DynamicVirtualScroll {
+  constructor(container, items, renderItem) {
+    this.container = container;
+    this.items = items;
+    this.renderItem = renderItem;
+    
+    // 缓存每个项目的高度
+    this.itemHeights = new Map();
+    this.itemOffsets = [];
+    
+    this.scrollTop = 0;
+    this.containerHeight = container.clientHeight;
+    
+    this.init();
+  }
+  
+  init() {
+    // 估算总高度
+    this.estimatedItemHeight = 50;
+    this.totalHeight = this.items.length * this.estimatedItemHeight;
+    
+    this.content = document.createElement('div');
+    this.content.style.height = `${this.totalHeight}px`;
+    this.content.style.position = 'relative';
+    this.container.appendChild(this.content);
+    
+    this.container.addEventListener('scroll', () => {
+      this.handleScroll();
+    });
+    
+    this.render();
+  }
+  
+  getItemHeight(index) {
+    if (this.itemHeights.has(index)) {
+      return this.itemHeights.get(index);
+    }
+    return this.estimatedItemHeight;
+  }
+  
+  getItemOffset(index) {
+    if (this.itemOffsets[index] !== undefined) {
+      return this.itemOffsets[index];
+    }
+    
+    let offset = 0;
+    for (let i = 0; i < index; i++) {
+      offset += this.getItemHeight(i);
+    }
+    this.itemOffsets[index] = offset;
+    return offset;
+  }
+  
+  findVisibleRange() {
+    let startIndex = 0;
+    let endIndex = this.items.length - 1;
+    
+    // 二分查找起始索引
+    let low = 0;
+    let high = this.items.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const offset = this.getItemOffset(mid);
+      if (offset < this.scrollTop) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+        startIndex = mid;
+      }
+    }
+    
+    // 查找结束索引
+    const visibleBottom = this.scrollTop + this.containerHeight;
+    for (let i = startIndex; i < this.items.length; i++) {
+      const offset = this.getItemOffset(i);
+      if (offset > visibleBottom) {
+        endIndex = i;
+        break;
+      }
+    }
+    
+    return { startIndex, endIndex };
+  }
+  
+  handleScroll() {
+    const newScrollTop = this.container.scrollTop;
+    if (newScrollTop !== this.scrollTop) {
+      this.scrollTop = newScrollTop;
+      this.render();
+    }
+  }
+  
+  render() {
+    const { startIndex, endIndex } = this.findVisibleRange();
+    
+    this.content.innerHTML = '';
+    
+    for (let i = startIndex; i <= endIndex; i++) {
+      const item = this.items[i];
+      const element = this.renderItem(item, i);
+      const offset = this.getItemOffset(i);
+      
+      // 测量实际高度
+      this.content.appendChild(element);
+      const actualHeight = element.offsetHeight;
+      
+      if (!this.itemHeights.has(i) || this.itemHeights.get(i) !== actualHeight) {
+        this.itemHeights.set(i, actualHeight);
+        // 清除后续的offset缓存
+        this.itemOffsets.fill(undefined, i);
+      }
+      
+      element.style.position = 'absolute';
+      element.style.top = `${offset}px`;
+      element.style.left = '0';
+      element.style.right = '0';
+    }
+    
+    // 更新总高度
+    const lastOffset = this.getItemOffset(this.items.length - 1);
+    const lastHeight = this.getItemHeight(this.items.length - 1);
+    this.totalHeight = lastOffset + lastHeight;
+    this.content.style.height = `${this.totalHeight}px`;
+  }
+}
+```
+
+### 24. 代码分割和动态导入的策略是什么？如何实现路由级别的代码分割？
+
+**答案：**
+
+**代码分割策略：**
+
+**1. 入口点分割：**
+```javascript
+// webpack.config.js
+module.exports = {
+  entry: {
+    main: './src/index.js',
+    vendor: './src/vendor.js'
+  },
+  optimization: {
+    splitChunks: {
+      chunks: 'all'
+    }
+  }
+};
+```
+
+**2. 动态导入：**
+```javascript
+// 路由级别代码分割
+import { lazy, Suspense } from 'react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+
+// 懒加载组件
+const Home = lazy(() => import('./pages/Home'));
+const About = lazy(() => import('./pages/About'));
+const Contact = lazy(() => import('./pages/Contact'));
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Suspense fallback={<div>Loading...</div>}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/about" element={<About />} />
+          <Route path="/contact" element={<Contact />} />
+        </Routes>
+      </Suspense>
+    </BrowserRouter>
+  );
+}
+```
+
+**3. 条件加载：**
+```javascript
+// 根据条件动态加载
+async function loadFeature(featureName) {
+  switch (featureName) {
+    case 'chart':
+      return await import('./features/chart');
+    case 'editor':
+      return await import('./features/editor');
+    default:
+      return null;
+  }
+}
+
+// 使用
+const Chart = await loadFeature('chart');
+```
+
+**4. 预加载策略：**
+```javascript
+// 预加载下一个可能访问的路由
+function preloadRoute(routeName) {
+  const routeMap = {
+    about: () => import('./pages/About'),
+    contact: () => import('./pages/Contact')
+  };
+  
+  if (routeMap[routeName]) {
+    routeMap[routeName]();
+  }
+}
+
+// 鼠标悬停时预加载
+<Link 
+  to="/about"
+  onMouseEnter={() => preloadRoute('about')}
+>
+  About
+</Link>
+```
+
+**Webpack代码分割配置：**
+```javascript
+// webpack.config.js
+module.exports = {
+  optimization: {
+    splitChunks: {
+      chunks: 'all',
+      cacheGroups: {
+        // 第三方库
+        vendor: {
+          test: /[\\/]node_modules[\\/]/,
+          name: 'vendors',
+          priority: 10
+        },
+        // 公共代码
+        common: {
+          minChunks: 2,
+          priority: 5,
+          reuseExistingChunk: true
+        },
+        // React相关
+        react: {
+          test: /[\\/]node_modules[\\/](react|react-dom)[\\/]/,
+          name: 'react',
+          priority: 20
+        }
+      }
+    }
+  }
+};
+```
+
+**React.lazy最佳实践：**
+```javascript
+// 1. 错误边界包装
+import { ErrorBoundary } from 'react-error-boundary';
+
+function ErrorFallback({ error, resetErrorBoundary }) {
+  return (
+    <div>
+      <h2>Something went wrong:</h2>
+      <pre>{error.message}</pre>
+      <button onClick={resetErrorBoundary}>Try again</button>
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <ErrorBoundary FallbackComponent={ErrorFallback}>
+      <Suspense fallback={<Loading />}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+        </Routes>
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+
+// 2. 加载状态组件
+function Loading() {
+  return (
+    <div className="loading-container">
+      <Spinner />
+      <p>Loading...</p>
+    </div>
+  );
+}
+
+// 3. 重试机制
+function lazyWithRetry(componentImport) {
+  return lazy(() =>
+    componentImport().catch((error) => {
+      // 重试逻辑
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          resolve(componentImport());
+        }, 1000);
+      });
+    })
+  );
+}
+```
+
+### 25. Web Workers和SharedArrayBuffer的使用场景是什么？如何实现多线程编程？
+
+**答案：**
+
+**Web Workers基础：**
+```javascript
+// main.js
+const worker = new Worker('worker.js');
+
+// 发送消息
+worker.postMessage({ type: 'calculate', data: [1, 2, 3, 4, 5] });
+
+// 接收消息
+worker.onmessage = (event) => {
+  console.log('Result:', event.data);
+};
+
+// 错误处理
+worker.onerror = (error) => {
+  console.error('Worker error:', error);
+};
+
+// 终止Worker
+// worker.terminate();
+
+// worker.js
+self.onmessage = (event) => {
+  const { type, data } = event.data;
+  
+  if (type === 'calculate') {
+    const result = data.reduce((sum, num) => sum + num, 0);
+    self.postMessage({ result });
+  }
+};
+```
+
+**复杂计算示例：**
+```javascript
+// main.js
+class CalculationWorker {
+  constructor() {
+    this.worker = new Worker('calculation-worker.js');
+    this.pending = new Map();
+    this.requestId = 0;
+    
+    this.worker.onmessage = (event) => {
+      const { requestId, result, error } = event.data;
+      const { resolve, reject } = this.pending.get(requestId);
+      this.pending.delete(requestId);
+      
+      if (error) {
+        reject(new Error(error));
+      } else {
+        resolve(result);
+      }
+    };
+  }
+  
+  calculate(data) {
+    return new Promise((resolve, reject) => {
+      const requestId = ++this.requestId;
+      this.pending.set(requestId, { resolve, reject });
+      
+      this.worker.postMessage({
+        requestId,
+        type: 'calculate',
+        data
+      });
+    });
+  }
+  
+  terminate() {
+    this.worker.terminate();
+  }
+}
+
+// 使用
+const worker = new CalculationWorker();
+const result = await worker.calculate([1, 2, 3, 4, 5]);
+console.log(result);
+
+// calculation-worker.js
+self.onmessage = (event) => {
+  const { requestId, type, data } = event.data;
+  
+  try {
+    let result;
+    switch (type) {
+      case 'calculate':
+        // 复杂计算
+        result = performHeavyCalculation(data);
+        break;
+      default:
+        throw new Error('Unknown type');
+    }
+    
+    self.postMessage({ requestId, result });
+  } catch (error) {
+    self.postMessage({ requestId, error: error.message });
+  }
+};
+
+function performHeavyCalculation(data) {
+  // 模拟复杂计算
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) {
+    for (let j = 0; j < 1000000; j++) {
+      sum += data[i] * j;
+    }
+  }
+  return sum;
+}
+```
+
+**SharedArrayBuffer：**
+```javascript
+// 主线程
+const sharedBuffer = new SharedArrayBuffer(1024);
+const sharedArray = new Int32Array(sharedBuffer);
+
+// 创建Worker
+const worker1 = new Worker('worker.js');
+const worker2 = new Worker('worker.js');
+
+// 传递SharedArrayBuffer
+worker1.postMessage({ buffer: sharedBuffer, id: 1 });
+worker2.postMessage({ buffer: sharedBuffer, id: 2 });
+
+// Worker可以共享数据
+// worker.js
+self.onmessage = (event) => {
+  const { buffer, id } = event.data;
+  const sharedArray = new Int32Array(buffer);
+  
+  // 使用Atomics进行原子操作
+  Atomics.add(sharedArray, 0, id);
+  
+  // 通知主线程
+  self.postMessage({ id, value: Atomics.load(sharedArray, 0) });
+};
+```
+
+**Atomics API：**
+```javascript
+// 原子操作，避免竞争条件
+const sharedBuffer = new SharedArrayBuffer(1024);
+const sharedArray = new Int32Array(sharedBuffer);
+
+// Atomics.add：原子加法
+Atomics.add(sharedArray, 0, 1);
+
+// Atomics.sub：原子减法
+Atomics.sub(sharedArray, 0, 1);
+
+// Atomics.compareExchange：比较并交换
+Atomics.compareExchange(sharedArray, 0, 0, 1);
+
+// Atomics.wait和Atomics.notify：等待和通知
+Atomics.wait(sharedArray, 0, 0); // 等待值变为0
+Atomics.notify(sharedArray, 0, 1); // 通知等待的线程
+```
+
+**实际应用：图像处理**
+```javascript
+// main.js
+function processImage(imageData) {
+  return new Promise((resolve) => {
+    const worker = new Worker('image-worker.js');
+    
+    worker.postMessage({ imageData });
+    
+    worker.onmessage = (event) => {
+      resolve(event.data);
+      worker.terminate();
+    };
+  });
+}
+
+// image-worker.js
+self.onmessage = (event) => {
+  const { imageData } = event.data;
+  const { data, width, height } = imageData;
+  
+  // 图像处理（灰度化）
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    data[i] = gray;
+    data[i + 1] = gray;
+    data[i + 2] = gray;
+  }
+  
+  self.postMessage({ imageData });
+};
+```
+
+### 26. Generator如何实现协程？async迭代器和可取消的Promise如何实现？
+
+**答案：**
+
+**Generator实现协程：**
+```javascript
+// 协程：可以暂停和恢复执行的函数
+function* coroutine() {
+  console.log('Start');
+  const value1 = yield 'First yield';
+  console.log('Received:', value1);
+  const value2 = yield 'Second yield';
+  console.log('Received:', value2);
+  return 'Done';
+}
+
+const gen = coroutine();
+console.log(gen.next());      // { value: 'First yield', done: false }
+console.log(gen.next('Hello')); // { value: 'Second yield', done: false }
+console.log(gen.next('World')); // { value: 'Done', done: true }
+
+// 实现异步协程
+function* asyncCoroutine() {
+  const data1 = yield fetch('/api/data1').then(r => r.json());
+  const data2 = yield fetch('/api/data2').then(r => r.json());
+  return { data1, data2 };
+}
+
+function runAsync(gen) {
+  const iterator = gen();
+  
+  function handle(result) {
+    if (result.done) return Promise.resolve(result.value);
+    
+    return Promise.resolve(result.value)
+      .then(res => handle(iterator.next(res)))
+      .catch(err => handle(iterator.throw(err)));
+  }
+  
+  return handle(iterator.next());
+}
+
+runAsync(asyncCoroutine).then(console.log);
+```
+
+**async迭代器：**
+```javascript
+// 实现异步迭代器
+const asyncIterable = {
+  async *[Symbol.asyncIterator]() {
+    for (let i = 0; i < 5; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      yield i;
+    }
+  }
+};
+
+// 使用for await...of
+(async () => {
+  for await (const value of asyncIterable) {
+    console.log(value); // 0, 1, 2, 3, 4（每秒输出一个）
+  }
+})();
+
+// 手动迭代
+const iterator = asyncIterable[Symbol.asyncIterator]();
+iterator.next().then(({ value, done }) => {
+  console.log(value); // 0
+});
+```
+
+**可取消的Promise：**
+```javascript
+// 方法1：使用AbortController
+function cancellablePromise(executor) {
+  let abortController = new AbortController();
+  
+  const promise = new Promise((resolve, reject) => {
+    executor(resolve, reject, abortController.signal);
+    
+    abortController.signal.addEventListener('abort', () => {
+      reject(new Error('Cancelled'));
+    });
+  });
+  
+  promise.cancel = () => {
+    abortController.abort();
+  };
+  
+  return promise;
+}
+
+// 使用
+const promise = cancellablePromise((resolve, reject, signal) => {
+  const timer = setTimeout(() => {
+    resolve('Done');
+  }, 5000);
+  
+  signal.addEventListener('abort', () => {
+    clearTimeout(timer);
+  });
+});
+
+promise.cancel(); // 取消Promise
+
+// 方法2：使用标志位
+function createCancellablePromise(executor) {
+  let cancelled = false;
+  
+  const promise = new Promise((resolve, reject) => {
+    executor(
+      (value) => {
+        if (!cancelled) resolve(value);
+      },
+      (error) => {
+        if (!cancelled) reject(error);
+      },
+      () => cancelled
+    );
+  });
+  
+  promise.cancel = () => {
+    cancelled = true;
+  };
+  
+  return promise;
+}
+
+// 使用
+const fetchPromise = createCancellablePromise((resolve, reject, isCancelled) => {
+  fetch('/api/data')
+    .then(response => {
+      if (isCancelled()) return;
+      return response.json();
+    })
+    .then(data => {
+      if (isCancelled()) return;
+      resolve(data);
+    })
+    .catch(reject);
+});
+
+fetchPromise.cancel();
+```
+
+### 27. 如何实现观察者模式、发布订阅模式和状态机？
+
+**答案：**
+
+**观察者模式：**
+```javascript
+// 观察者模式：对象间一对多的依赖关系
+class Subject {
+  constructor() {
+    this.observers = [];
+  }
+  
+  subscribe(observer) {
+    this.observers.push(observer);
+    return () => {
+      this.observers = this.observers.filter(o => o !== observer);
+    };
+  }
+  
+  notify(data) {
+    this.observers.forEach(observer => observer.update(data));
+  }
+}
+
+class Observer {
+  constructor(name) {
+    this.name = name;
+  }
+  
+  update(data) {
+    console.log(`${this.name} received:`, data);
+  }
+}
+
+// 使用
+const subject = new Subject();
+const observer1 = new Observer('Observer 1');
+const observer2 = new Observer('Observer 2');
+
+subject.subscribe(observer1);
+subject.subscribe(observer2);
+
+subject.notify('Hello'); // 两个观察者都收到消息
+```
+
+**发布订阅模式：**
+```javascript
+// 发布订阅模式：通过事件中心解耦发布者和订阅者
+class EventEmitter {
+  constructor() {
+    this.events = {};
+  }
+  
+  on(event, callback) {
+    if (!this.events[event]) {
+      this.events[event] = [];
+    }
+    this.events[event].push(callback);
+    
+    // 返回取消订阅函数
+    return () => {
+      this.events[event] = this.events[event].filter(cb => cb !== callback);
+    };
+  }
+  
+  emit(event, ...args) {
+    if (this.events[event]) {
+      this.events[event].forEach(callback => callback(...args));
+    }
+  }
+  
+  off(event, callback) {
+    if (this.events[event]) {
+      this.events[event] = this.events[event].filter(cb => cb !== callback);
+    }
+  }
+  
+  once(event, callback) {
+    const wrapper = (...args) => {
+      callback(...args);
+      this.off(event, wrapper);
+    };
+    this.on(event, wrapper);
+  }
+}
+
+// 使用
+const emitter = new EventEmitter();
+
+emitter.on('user:login', (user) => {
+  console.log('User logged in:', user);
+});
+
+emitter.emit('user:login', { id: 1, name: 'John' });
+```
+
+**状态机实现：**
+```javascript
+// 有限状态机
+class StateMachine {
+  constructor(initialState, transitions) {
+    this.state = initialState;
+    this.transitions = transitions;
+    this.listeners = [];
+  }
+  
+  transition(event) {
+    const transition = this.transitions[this.state]?.[event];
+    
+    if (!transition) {
+      throw new Error(`Invalid transition from ${this.state} with event ${event}`);
+    }
+    
+    const oldState = this.state;
+    this.state = transition.to;
+    
+    // 执行回调
+    if (transition.onTransition) {
+      transition.onTransition(oldState, this.state);
+    }
+    
+    // 通知监听器
+    this.listeners.forEach(listener => {
+      listener(oldState, this.state, event);
+    });
+  }
+  
+  canTransition(event) {
+    return !!this.transitions[this.state]?.[event];
+  }
+  
+  onStateChange(listener) {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter(l => l !== listener);
+    };
+  }
+}
+
+// 使用：门的状态机
+const doorMachine = new StateMachine('closed', {
+  closed: {
+    open: {
+      to: 'opened',
+      onTransition: (from, to) => {
+        console.log('Door opened');
+      }
+    }
+  },
+  opened: {
+    close: {
+      to: 'closed',
+      onTransition: (from, to) => {
+        console.log('Door closed');
+      }
+    },
+    lock: {
+      to: 'locked',
+      onTransition: (from, to) => {
+        console.log('Door locked');
+      }
+    }
+  },
+  locked: {
+    unlock: {
+      to: 'opened',
+      onTransition: (from, to) => {
+        console.log('Door unlocked');
+      }
+    }
+  }
+});
+
+doorMachine.onStateChange((oldState, newState) => {
+  console.log(`State changed: ${oldState} -> ${newState}`);
+});
+
+doorMachine.transition('open');  // Door opened
+doorMachine.transition('lock');  // Door locked
+doorMachine.transition('unlock'); // Door unlocked
+```
+
+### 28. 如何使用Proxy实现响应式系统和ORM？
+
+**答案：**
+
+**响应式系统实现：**
+```javascript
+// Vue 3风格的响应式系统
+function reactive(target) {
+  const handlers = {
+    get(target, key, receiver) {
+      track(target, key); // 收集依赖
+      const result = Reflect.get(target, key, receiver);
+      
+      // 如果值是对象，递归响应式
+      if (typeof result === 'object' && result !== null) {
+        return reactive(result);
+      }
+      
+      return result;
+    },
+    
+    set(target, key, value, receiver) {
+      const oldValue = target[key];
+      const result = Reflect.set(target, key, value, receiver);
+      
+      if (oldValue !== value) {
+        trigger(target, key); // 触发更新
+      }
+      
+      return result;
+    }
+  };
+  
+  return new Proxy(target, handlers);
+}
+
+// 依赖收集
+const targetMap = new WeakMap();
+let activeEffect = null;
+
+function track(target, key) {
+  if (!activeEffect) return;
+  
+  let depsMap = targetMap.get(target);
+  if (!depsMap) {
+    targetMap.set(target, (depsMap = new Map()));
+  }
+  
+  let dep = depsMap.get(key);
+  if (!dep) {
+    depsMap.set(key, (dep = new Set()));
+  }
+  
+  dep.add(activeEffect);
+}
+
+function trigger(target, key) {
+  const depsMap = targetMap.get(target);
+  if (!depsMap) return;
+  
+  const dep = depsMap.get(key);
+  if (dep) {
+    dep.forEach(effect => effect());
+  }
+}
+
+function effect(fn) {
+  activeEffect = fn;
+  fn();
+  activeEffect = null;
+}
+
+// 使用
+const state = reactive({ count: 0, name: 'John' });
+
+effect(() => {
+  console.log(`Count: ${state.count}`);
+});
+
+state.count++; // 自动触发更新
+```
+
+**ORM实现：**
+```javascript
+// 简单的ORM实现
+class Model {
+  constructor(data) {
+    return new Proxy(this, {
+      get(target, key) {
+        if (key in target) {
+          return target[key];
+        }
+        return target.data[key];
+      },
+      
+      set(target, key, value) {
+        if (key in target) {
+          target[key] = value;
+        } else {
+          target.data[key] = value;
+          target.dirty = true;
+        }
+        return true;
+      }
+    });
+  }
+  
+  save() {
+    if (this.dirty) {
+      // 保存到数据库
+      console.log('Saving:', this.data);
+      this.dirty = false;
+    }
+  }
+}
+
+class User extends Model {
+  constructor(data) {
+    super();
+    this.data = data;
+    this.dirty = false;
+  }
+  
+  get fullName() {
+    return `${this.data.firstName} ${this.data.lastName}`;
+  }
+}
+
+// 使用
+const user = new User({
+  id: 1,
+  firstName: 'John',
+  lastName: 'Doe'
+});
+
+console.log(user.firstName); // 'John'
+console.log(user.fullName);  // 'John Doe'
+
+user.firstName = 'Jane';
+user.save(); // Saving: { id: 1, firstName: 'Jane', lastName: 'Doe' }
+```
+
+### 29. 浏览器缓存机制有哪些？Service Worker缓存策略是什么？
+
+**答案：**
+
+**HTTP缓存：**
+```javascript
+// 1. 强缓存
+// Cache-Control: max-age=3600
+// Expires: Wed, 21 Oct 2025 07:28:00 GMT
+
+// 2. 协商缓存
+// ETag: "33a64df551425fcc55e4d42a148795d9f25f89d4"
+// Last-Modified: Wed, 21 Oct 2024 07:28:00 GMT
+
+// 检查缓存
+async function fetchWithCache(url, options = {}) {
+  const cache = await caches.open('my-cache');
+  const cached = await cache.match(url);
+  
+  if (cached) {
+    const cacheDate = cached.headers.get('date');
+    const maxAge = 3600000; // 1小时
+    
+    if (Date.now() - new Date(cacheDate).getTime() < maxAge) {
+      return cached;
+    }
+  }
+  
+  const response = await fetch(url, options);
+  cache.put(url, response.clone());
+  return response;
+}
+```
+
+**Service Worker缓存策略：**
+```javascript
+// Service Worker缓存策略
+const CACHE_NAME = 'my-cache-v1';
+const urlsToCache = [
+  '/',
+  '/styles/main.css',
+  '/script/main.js'
+];
+
+// 安装时缓存
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then(cache => cache.addAll(urlsToCache))
+  );
+});
+
+// 策略1：Cache First（缓存优先）
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    caches.match(event.request)
+      .then(response => {
+        if (response) {
+          return response; // 从缓存返回
+        }
+        return fetch(event.request); // 网络请求
+      })
+  );
+});
+
+// 策略2：Network First（网络优先）
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    fetch(event.request)
+      .then(response => {
+        const responseClone = response.clone();
+        caches.open(CACHE_NAME).then(cache => {
+          cache.put(event.request, responseClone);
+        });
+        return response;
+      })
+      .catch(() => {
+        return caches.match(event.request);
+      })
+  );
+});
+
+// 策略3：Stale While Revalidate（后台更新）
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    caches.match(event.request)
+      .then(cachedResponse => {
+        const fetchPromise = fetch(event.request)
+          .then(networkResponse => {
+            caches.open(CACHE_NAME).then(cache => {
+              cache.put(event.request, networkResponse.clone());
+            });
+            return networkResponse;
+          });
+        
+        return cachedResponse || fetchPromise;
+      })
+  );
+});
+```
+
+### 30. 跨域解决方案有哪些？CORS的工作原理是什么？
+
+**答案：**
+
+**CORS详解：**
+```javascript
+// 简单请求
+// 请求方法：GET、POST、HEAD
+// 请求头：Content-Type（text/plain、application/x-www-form-urlencoded、multipart/form-data）
+
+fetch('https://api.example.com/data', {
+  method: 'GET',
+  headers: {
+    'Content-Type': 'application/json'
+  }
+});
+
+// 预检请求（OPTIONS）
+// 复杂请求需要先发送OPTIONS请求
+fetch('https://api.example.com/data', {
+  method: 'PUT',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-Custom-Header': 'value'
+  }
+});
+
+// 服务端CORS配置
+// Express示例
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', 'https://example.com');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+```
+
+**其他跨域方案：**
+```javascript
+// 1. JSONP
+function jsonp(url, callback) {
+  const script = document.createElement('script');
+  const callbackName = 'jsonp_callback_' + Date.now();
+  
+  window[callbackName] = function(data) {
+    callback(data);
+    document.body.removeChild(script);
+    delete window[callbackName];
+  };
+  
+  script.src = `${url}?callback=${callbackName}`;
+  document.body.appendChild(script);
+}
+
+// 2. postMessage
+// 页面A
+window.postMessage({ type: 'data', payload: 'Hello' }, 'https://example.com');
+
+// 页面B
+window.addEventListener('message', (event) => {
+  if (event.origin === 'https://trusted-site.com') {
+    console.log(event.data);
+  }
+});
+
+// 3. 代理服务器
+// 开发环境使用webpack-dev-server代理
+// webpack.config.js
+module.exports = {
+  devServer: {
+    proxy: {
+      '/api': {
+        target: 'https://api.example.com',
+        changeOrigin: true,
+        pathRewrite: { '^/api': '' }
+      }
+    }
+  }
+};
+```
+
+### 31. XSS和CSRF攻击如何防护？CSP策略是什么？
+
+**答案：**
+
+**XSS防护：**
+```javascript
+// 1. 输入验证和转义
+function escapeHtml(text) {
+  const map = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  };
+  return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+// 2. 使用DOMPurify清理HTML
+import DOMPurify from 'dompurify';
+const clean = DOMPurify.sanitize(dirty);
+
+// 3. Content Security Policy
+// HTTP头：Content-Security-Policy: default-src 'self'
+// 或meta标签：<meta http-equiv="Content-Security-Policy" content="default-src 'self'">
+```
+
+**CSRF防护：**
+```javascript
+// 1. CSRF Token
+// 服务端生成token
+const csrfToken = generateToken();
+// 返回给客户端，客户端在请求头中携带
+fetch('/api/data', {
+  headers: {
+    'X-CSRF-Token': csrfToken
+  }
+});
+
+// 2. SameSite Cookie
+// Set-Cookie: sessionid=abc123; SameSite=Strict
+
+// 3. 验证Referer
+// 服务端检查Referer头
+if (req.headers.referer !== 'https://trusted-site.com') {
+  return res.status(403).send('Forbidden');
+}
+```
+
+**CSP策略：**
+```javascript
+// Content Security Policy示例
+// 只允许同源脚本
+Content-Security-Policy: default-src 'self'
+
+// 允许特定域名
+Content-Security-Policy: script-src 'self' https://trusted-cdn.com
+
+// 禁止内联脚本
+Content-Security-Policy: script-src 'self'; object-src 'none'
+
+// 报告违规
+Content-Security-Policy: default-src 'self'; report-uri /csp-report
+```
+
+---
+
 ## 总结
 
 本模块涵盖了JavaScript的核心知识点，包括：
@@ -2524,6 +5125,7 @@ safeGet(obj, 'user.age', 0); // 0
 - ES2020+新特性（BigInt、可选链、空值合并等）
 - Proxy和Reflect
 - 函数高级特性（防抖节流、柯里化等）
+- **高级主题**：V8引擎、内存管理、事件循环、模块化、Symbol/WeakMap/WeakSet
 
 每个知识点都包含详细的解释、代码示例和最佳实践，适合3年经验的前端开发者复习和面试准备。
 - **节流**：适用于需要控制执行频率的场景（滚动、拖拽、动画）
